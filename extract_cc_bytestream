@@ -1,0 +1,235 @@
+#!/usr/bin/perl
+#
+# Extract a CC data from a set of pgm (P5) files, representing frames
+#  and convert them to raw data and webvtt files
+#
+# fcc 73.699 figure 17 shows format of flickers
+# fcc 73.682(a)(22) specifies line 21 of each field for the transmission of
+#   captions.  field 1 and field 2 are distinct streams
+# fcc 15.199 describes the coding itself
+#
+use strict;
+use warnings;
+use FindBin qw($Bin);
+use lib "$Bin/../lib";
+use Getopt::Long;
+
+my $FFMPEG = "$Bin/ffmpeg";
+my $CCEXTRACT = "$Bin/ccextractor";
+
+my $CCBASE = 25;  # the starting line of the pgm
+my $CCLINE = 1;   # the PGM line to use for CC data (real=$CCBASE + $CCLINE)
+my $CCHEIGHT = 4; # the height of the PGM file to make
+my $FRAMERATE = 29.97;
+my $BITWIDTH = 27;  # ~27 pixels per data bit.
+
+my $DEBUG = 0;
+
+GetOptions("ccbase=i" => \$CCBASE,
+	   "ccline=i" => \$CCLINE,
+	   "ccheight=i" => \$CCHEIGHT,
+	   "framerate=f" => \$FRAMERATE,
+           "debug!" => \$DEBUG);
+
+my ($infile, $outfile) = @ARGV;
+if(!defined($infile) || $infile eq "" || !defined($outfile) || $outfile eq "") {
+    print STDERR "Usage: $0 <video or tarball of frames> <cc outfile basename>\n";
+    exit 1;
+}
+
+# Phase 1: generate images
+my $tmpdir = "${outfile}_frames";
+mkdir($tmpdir);
+my @files;
+my $useTarball = 0;
+if($infile=~m/\.(tgz|tar\.gz)/) {
+    system("tar -xf \"$infile\" -C \"$tmpdir\"");
+    $useTarball = 1;
+} else {
+    system("$FFMPEG -loglevel error -i \"$infile\" -vf crop=w=704:h=$CCHEIGHT:y=$CCBASE:x=8 -aspect 704:$CCHEIGHT -pix_fmt gray -f image2 $tmpdir/frame%06d.pgm  2>&1");
+}
+opendir(D, $tmpdir);
+while(defined(my $f = readdir(D))) {
+    push(@files, "$tmpdir/$f");
+}
+closedir(D);
+
+
+# Phase 2: decode CC
+open(O, ">$outfile.raw");
+foreach my $file (sort @files) {
+    next if($file!~m/frame\d+\.pgm/);
+    open(H, $file);
+    chomp(my $magic = <H>);
+    if($magic ne "P5") {
+        print "SKIPPING $file: image not P5 pgm.\n" if($DEBUG);
+	print O pack("S", 0);
+        next;
+    }
+    chomp(my $dims = <H>);
+    my($w, $h) = split(/\s+/, $dims);
+    if(defined($CCLINE) && $CCLINE > ($h - 1)) {
+        print "SKIPPING $file: CC line ($CCLINE) not in the image field ($h).\n" if($DEBUG);
+	print O pack("S", 0);
+        next;
+    }
+    chomp(my $depth = <H>);
+    if($depth != 255) {
+        print "SKIPPING $file:  image not 8-bit.\n" if($DEBUG);
+	print O pack("S", 0);
+        next;
+    }
+    my @image = ();
+    for(my $y = 0; $y < $h; $y++) {
+        my $row;
+	read(H, $row, $w);
+        $image[$y] = [unpack("C[$w]", $row)];
+    }
+    close(H);
+    
+    # scale the pixels between 0 and 10
+    my $max = 0; 
+    my $min = 256;
+    for(my $y = 0; $y < $h; $y++) {
+	for(my $x = 0; $x < $w; $x++) {
+	    $max = $image[$y][$x] if($image[$y][$x] > $max);
+	    $min = $image[$y][$x] if($image[$y][$x] < $min);
+	}
+    }
+    my $range = $max - $min;
+    if($range == 0) {
+	print "SKIPPING $file: luma range is 0\n" if($DEBUG);
+	print O pack("S", 0);
+	next;
+    }
+    for(my $y = 0; $y < $h; $y++) {
+	for(my $x = 0; $x < $w; $x++) {
+	    $image[$y][$x] = int(($image[$y][$x]  - $min) * (10 / $range));
+	    $image[$y][$x] = 9 if($image[$y][$x] == 10);
+	}
+    }
+
+    # using timing from FCC 73.699 Figure 17:
+    # 7 cycles of clock run-in.  Using 0.8H = 704 pixels, the run-in is 0.2H,
+    # which is 176 pixels -- but I'm going to scan out to 190, because there's
+    # a horizontal offset.
+    # Also:  ignore separate peaks/valleys if they are less than 1/4 the
+    # expected wavelength (22 or 23 pixels)
+    my $hasCC = 0;
+    my @chars = ();
+    my $last = 0;
+    my $peaks = 0;
+    my $pulseOffset = undef;
+    my $lastPeak = undef;
+    my $lastMarker = 0;
+    my $peakSum = 0;
+    my $direction = -1;
+    for(my $x = 0; $x < 190; $x++) {
+	my $v = $image[$CCLINE][$x];
+	if($direction == 1) {
+	    # for the next drop
+	    if($v < $last && (($x - $lastMarker) > 4)) {
+		$direction = -1;
+		$peaks++;
+		$image[$CCLINE - 1][$x - 1] = 9;
+		$peakSum += ($x - $lastPeak) if(defined($lastPeak));
+		$lastPeak = $x;
+		$lastMarker = $x;
+	    }
+	} elsif($direction == -1) {
+	    # look for the next rise
+	    if($v > $last && (($x - $lastMarker) > 4)) {
+		$direction = 1;
+		$image[$CCLINE -1][$x - 1] = 5;
+		$pulseOffset = $x if(!defined($pulseOffset));
+		$lastMarker = $x;
+	    }
+	}
+	$last = $v;
+    }
+
+    my $pulseLength = $peaks > 0? int($peakSum / $peaks) : 0;
+    my $startBit = 0;
+    if($peaks == 7) {
+	# Look for the START Bit
+	# find the start of the start bit -- it should be around
+	# 240, so we'll start at 220
+	for($startBit = 220; $startBit < 305; $startBit++) {
+	    if($image[$CCLINE][$startBit] > 4) {
+		$startBit += int($BITWIDTH / 2);
+		$image[$CCLINE - 1][$startBit] = 9;
+		last;
+	    }
+	}
+	if($startBit > 245 && $startBit < 270) {
+	    $hasCC = 1;
+	    # Two 7-bit + parity ascii characters follow	
+	    my $bitBuffer = "";
+	    for(my $b = 0; $b < 2; $b++) {
+		my $v = 0;
+		my $parity = 0;
+		my @bits = ();
+		for(my $i = 0; $i < 8; $i++) {
+		    my $offset = $startBit + ((($b * 8) + $i + 1) * $BITWIDTH);
+		    my $value = $image[$CCLINE][$offset];
+		    $image[$CCLINE - 1][$offset] = 5;
+		    if($value > 4) {
+			$v |= (1 << $i);
+			$parity++;
+			$bitBuffer .= "1";
+		    } else {
+			$bitBuffer .= "0";
+		    }
+		}		
+		$v = 0x7f if(!($parity & 1));
+		$chars[$b] = $v & 0x7f;
+	    }
+	    if($DEBUG) {
+		# get timing
+		$file=~m/frame(\d+)/;
+		my $frame = ($1 - 1);
+		my $time = $frame / $FRAMERATE;
+		my $msTime = int($time * 1000);
+		my $hours = int($time / 3600);
+		$time -= ($hours * 3600);
+		my $mins = int($time / 60);
+		my $secs = $time - ($mins * 60);
+		$time = sprintf("$msTime|%06d|%02d:%02d:%06.3f|", $frame, $hours, $mins, $secs);
+		printf "$time$bitBuffer|%02x|%02x\n", @chars;
+	    }
+	}
+    }
+    # write debugging image.
+    if($DEBUG) {
+	mkdir "cc_debug";
+	$file=~s/\./.read./;
+	$file=~s/$tmpdir/cc_debug\//;
+	open(H, ">$file");
+	print H "P5\n";
+	print H "$w $h\n";
+	print H "9\n";
+	for(my $i = 0; $i < $h; $i++) {
+	    print H pack("C$w", @{$image[$i]});
+	}
+	close(H);
+	if(defined($pulseOffset) && $peaks != 7) {
+	    print "$file Pulse Offset: $pulseOffset, Peaks: $peaks, PeakSum: $peakSum, WaveLength: $pulseLength, startBit: $startBit\n";
+	}
+	if(!$hasCC) {
+	    print "SKIPPING $file: no defined CC line.\n";
+	}
+    }
+    print O pack("cc", @chars);
+}
+
+close(O);  
+
+# create the tarball of the frame images
+if(!$useTarball) {
+    system("tar -czf \"${outfile}_frames.tgz\" -C \"${outfile}_frames\" .  2>/dev/null");
+    system("rm -rf \"${outfile}_frames\"");
+}
+
+# create a VTT file
+system("$CCEXTRACT -in=raw \"$outfile.raw\" -out=webvtt -o \"$outfile.vtt\" -trim -noru 2>&1 1>/dev/null");
+
