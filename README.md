@@ -1,21 +1,3 @@
-# Extract-CC-Bytestream
-Extract a closed-caption bytstream from video frames
-
-Produces:
-  * tarball of the extracted frame lines
-  * the raw bytes (two per frame) of the data
-  * a webvtt caption file
-
-Tunables:
-* $FFMPEG = the location of ffmpeg binary
-* $ CCEXTRACT = the location of the ccextract binary
-* $CCBASE = the starting line of the pgm for extraction
-* $CCLINE = the PGM line to use for CC data (real=$CCBASE + $CCLINE)
-* $CCHEIGHT = the height of the PGM file to make
-* $FRAMERATE = the video frame rate
-* $BITWIDTH = ~27 pixels per data bit.
-* $DEBUG = when set, more output is created, including images with pink spots where the actual samples were made
-
 # decode_cc.py
 
 Extract a closed-caption bytestream from video frame files
@@ -47,3 +29,27 @@ that through something like ccextractor or the like.
 
 The Python version will automatically derive the bit size from the data stream
 and it will adjust the luma of the image to try to get the best data.
+
+
+
+# Extract-CC-Bytestream
+Extract a closed-caption bytstream from video frames
+
+I should note that this code is ugly, but it worked for what we were using
+it for.
+
+Produces:
+  * tarball of the extracted frame lines
+  * the raw bytes (two per frame) of the data
+  * a webvtt caption file
+
+Tunables:
+* $FFMPEG = the location of ffmpeg binary
+* $ CCEXTRACT = the location of the ccextract binary
+* $CCBASE = the starting line of the pgm for extraction
+* $CCLINE = the PGM line to use for CC data (real=$CCBASE + $CCLINE)
+* $CCHEIGHT = the height of the PGM file to make
+* $FRAMERATE = the video frame rate
+* $BITWIDTH = ~27 pixels per data bit.
+* $DEBUG = when set, more output is created, including images with pink spots where the actual samples were made
+

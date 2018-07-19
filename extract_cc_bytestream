@@ -1,5 +1,10 @@
 #!/usr/bin/perl
 #
+# Copyright 2016-2018 Trustees of Indiana University
+#
+# This code is licensed under the APACHE 2.0 License
+#
+#
 # Extract a CC data from a set of pgm (P5) files, representing frames
 #  and convert them to raw data and webvtt files
 #

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3.6
+#
+# Copyright 2016-2018 Trustees of Indiana University
+#
+# This code is licensed under the APACHE 2.0 License
+#
 
 from PIL import Image
 from multiprocessing import Pool
